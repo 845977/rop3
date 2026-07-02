@@ -44,10 +44,10 @@ mov:
       op2: src
 
   # clc
-  # cmovc dst, src
+  # cmovnc dst, src
   - 
     - mnemonic: clc
-    - mnemonic: cmovc
+    - mnemonic: cmovnc
       op1: dst
       op2: src
 

@@ -226,9 +226,18 @@ class RopChain:
                 for gad in comb_gadgets[index]:
                     for side_reg in gad.side_regs:
                         side_effected[side_reg] += 1
+
+                    saved_dst = side_effected[gad.dst] if gad.dst else 0
+                    if saved_dst:
+                        side_effected[gad.dst] = 0
+
                     ropchain.append(gad)
                     yield from backtrack(index + 1, ropchain, side_effected)
                     ropchain.pop()
+
+                    if saved_dst:
+                        side_effected[gad.dst] = saved_dst
+
                     for side_reg in gad.side_regs:
                         side_effected[side_reg] -= 1
 

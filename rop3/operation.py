@@ -262,7 +262,8 @@ class Operand:
     def is_equal(self, decode, operand):
         operand_reg = None
 
-        if self.generic and self.is_src() and operand.type == arch_singleton.arch.op_imm:
+        # Allows generic reg -> imm substitution (not for mem)
+        if self.generic and self.is_src() and self.is_reg() and operand.type == arch_singleton.arch.op_imm:
             return (True, operand.value.imm)
 
         if self.type != operand.type:

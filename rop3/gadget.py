@@ -52,7 +52,7 @@ class Gadget:
 
     def calculate_side_effects(self) -> None:
         arch = arch_singleton.arch
-        excluded = {arch.normalize_reg(r) for r in (self.dst, self.src, arch.sp) if r is not None}
+        excluded = {arch.normalize_reg(r) for r in (self.dst, arch.sp) if r is not None}
 
         for decode in self.decodes:
             explicit = {decode.reg_name(r) for r in decode.regs_write}
