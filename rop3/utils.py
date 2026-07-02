@@ -16,6 +16,9 @@ along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
 import os
+import sys
+import json
+import csv
 import struct
 import __main__
 import capstone
@@ -25,7 +28,9 @@ MINOR = 0
 PATCH = 0
 VERSION = f'{MAJOR}.{MINOR}.{PATCH}'
 
-TOOL_NAME = os.path.basename(os.path.realpath(__main__.__file__))
+# __main__ may lack __file__ when imported as a library or in a spawned
+# multiprocessing worker; fall back to a sensible default in that case.
+TOOL_NAME = os.path.basename(os.path.realpath(getattr(__main__, '__file__', 'rop3.py')))
 
 HEADER = '\
                           .d8888b.  \n\
@@ -63,6 +68,55 @@ def print_ropchain(ropchain, idx=None):
     if idx is not None:
         print()
 
+# Columns used for the CSV output (list fields are space-joined)
+_CSV_COLUMNS = ['file', 'vaddr', 'gadget', 'bytes', 'count',
+                'symbol', 'op', 'dst', 'src', 'modifies']
+
+def _csv_record(gadget):
+    record = gadget.to_dict()
+    record['modifies'] = ' '.join(record['modifies'])
+    return record
+
+def output_gadgets(gadgets, fmt='text'):
+    ''' Emit a flat list of gadgets in the requested format. '''
+    if fmt == 'json':
+        print(json.dumps([g.to_dict() for g in gadgets], indent=2))
+    elif fmt == 'csv':
+        writer = csv.DictWriter(sys.stdout, fieldnames=_CSV_COLUMNS,
+                                extrasaction='ignore')
+        writer.writeheader()
+        for gadget in gadgets:
+            writer.writerow(_csv_record(gadget))
+    else:
+        for gadget in gadgets:
+            print(gadget)
+
+def output_ropchains(chains, fmt='text', exhaustive=False):
+    ''' Emit ROP chains (each a list of gadgets) in the requested format.
+        For plain text without --exhaustive only the first chain is consumed,
+        preserving the laziness of the search generator. '''
+    if fmt == 'text' and not exhaustive:
+        first = next(iter(chains), None)
+        if first is not None:
+            print_ropchain(first)
+        return
+
+    chains = list(chains)
+    if fmt == 'json':
+        print(json.dumps([[g.to_dict() for g in chain] for chain in chains], indent=2))
+    elif fmt == 'csv':
+        writer = csv.DictWriter(sys.stdout, fieldnames=['chain'] + _CSV_COLUMNS,
+                                extrasaction='ignore')
+        writer.writeheader()
+        for idx, chain in enumerate(chains, 1):
+            for gadget in chain:
+                record = _csv_record(gadget)
+                record['chain'] = idx
+                writer.writerow(record)
+    else:
+        for idx, chain in enumerate(chains, 1):
+            print_ropchain(chain, idx)
+
 def warning_text(text):
     return f'{WARNING_COLOR}{text}{END_COLOR}'
 
@@ -71,6 +125,8 @@ def pretty_addr(addr, mode=capstone.CS_MODE_64):
         padding = 8
     elif mode == capstone.CS_MODE_64:
         padding = 16
+    else:
+        raise ValueError(f'unsupported mode: {mode}')
 
     return f'{int(addr):#0{padding}x}'
 
@@ -79,6 +135,8 @@ def pack_addr(addr, mode=capstone.CS_MODE_64):
         formater = '<I'
     elif mode == capstone.CS_MODE_64:
         formater = '<Q'
+    else:
+        raise ValueError(f'unsupported mode: {mode}')
 
     return struct.pack(formater, addr)
 

@@ -52,8 +52,10 @@ class RopChain:
     def __init__(self, gadfinder):
         self.gadfinder = gadfinder
 
-    def search_from_files(self, binaries: list[str], ropfile, base=None, badchars=None) -> Iterator[list[Gadget]]:
-        gadgets = self.gadfinder.find(binaries, base=base, badchars=badchars)
+    def search_from_files(self, binaries: list[str], ropfile, base=None, badchars=None,
+                          badchar_bytes=None, arch=None, symbols=False) -> Iterator[list[Gadget]]:
+        gadgets = self.gadfinder.find(binaries, base=base, badchars=badchars,
+                                      badchar_bytes=badchar_bytes, arch=arch, symbols=symbols)
         return self.search_from_gadgets(gadgets, ropfile)
 
     def search_from_gadgets(self, gadgets, ropfile) -> Iterator[list[Gadget]]:
@@ -146,28 +148,34 @@ class RopChain:
           - sorted by heuristic_basic_count (fewest side effects first)
           - pruned of subsumed gadgets (when prune_equivalent), exploiting sort order
         Returns an array indexed [comb_idx][step_idx].
-        """
-        result = []
-        working_gadgets = [list(gl) for gl in ops_gadgets]
 
+        Each operation's gadget list is sorted once up front, and the
+        filter+prune result is memoized per (step, req_dst, req_src): different
+        combinations frequently request the same concrete registers for a given
+        step, so this avoids recomputing the same filtered list repeatedly.
+        """
+        sorted_gadgets = [sorted(gl, key=heuristic_basic_count) for gl in ops_gadgets]
+        cache: dict = {}
+
+        def build_step(i, req_dst, req_src):
+            key = (i,
+                   None if req_dst is None else str(req_dst),
+                   None if req_src is None else str(req_src))
+            if key not in cache:
+                filtered = [ gad for gad in sorted_gadgets[i] \
+                        if (req_dst is None or str(gad.dst) == str(req_dst)) \
+                        and (req_src is None or str(gad.src) == str(req_src)) ]
+                cache[key] = self._prune(filtered) if prune_equivalent else filtered
+            return cache[key]
+
+        result = []
         for comb in combinations:
             per_step = []
-            for i, gadget_list in enumerate(working_gadgets):
+            for i in range(len(sorted_gadgets)):
                 op = ropchain[i]
                 req_dst = comb.get(op.get('dst'))
                 req_src = comb.get(op.get('src'))
-
-                filtered = [ gad for gad in gadget_list \
-                        if (req_dst is None or str(gad.dst) == str(req_dst)) \
-                        and (req_src is None or str(gad.src) == str(req_src)) ]
-
-                filtered.sort(key=heuristic_basic_count)
-
-                if prune_equivalent:
-                    filtered = self._prune(filtered)
-
-                per_step.append(filtered)
-
+                per_step.append(build_step(i, req_dst, req_src))
             result.append(per_step)
 
         return result
@@ -259,7 +267,7 @@ class Tree:
         """
         Gadgets are the actual rop gadgets present in the binary.
         Returns (combinations, ops_gadgets) where each combination is a flat
-        dict mapping every abstract-register name to a normalised concrete reg.
+        dict mapping every abstract-register name to a normalized concrete reg.
         """
         (state, ops_gadgets, op_pairs) = self._get_initial_state(gadgets)
         combinations = self._traverse(state, op_pairs)

@@ -39,12 +39,21 @@ class ArgumentParser:
         self.argparser.add_argument('--verbose', action='store_true', default=False, help='show progress information (gadget counts, combinations)')
         self.argparser.add_argument('--binary', type=str, metavar='<file>', nargs='+', help='specify a list of binary path files to analyze')
         self.argparser.add_argument('--badchar', type=str, metavar='<hex>', nargs='+', help='specify a list of chars to avoid in gadget address')
+        self.argparser.add_argument('--badchar-bytes', type=str, metavar='<hex>', nargs='+', help='specify a list of chars to avoid in gadget opcode bytes')
+        self.argparser.add_argument('--keep-canary-address', action='store_true', default=False, help='do not prefer canary-free addresses (0x00, 0x0a, 0x0d, 0xff) when discarding duplicate gadgets')
         self.argparser.add_argument('--base', type=str, metavar='<hex>', nargs='+', help='specify a base address to relocate binary files (it may take a while). When you specify more than one base address, you need to provide one address for each binary')
+        self.argparser.add_argument('--arch', type=str, metavar='<name>', default=None, help='select the architecture slice of a fat Mach-O binary (e.g. x86_64, i386)')
+        self.argparser.add_argument('--symbols', action='store_true', default=False, help='annotate gadgets with the nearest symbol (when the binary is not stripped)')
+        self.argparser.add_argument('--output', choices=['text', 'json', 'csv'], default='text', help='output format (default: text)')
         self.argparser.add_argument('--op', type=str, metavar='<op>', help='search for operation')
         self.argparser.add_argument('--dst', type=str, metavar='<reg>', help='specify a destination register for the operation')
         self.argparser.add_argument('--src', type=str, metavar='<reg>', help='specify a source register for the operation')
         self.argparser.add_argument('--ropchain', type=str, metavar='<file>', help='plain text file with a ROP chain')
         self.argparser.add_argument('--exhaustive', action=argparse.BooleanOptionalAction, help="exhaustive search for ROP chains", default=False)
+        self.argparser.add_argument('--interactive', action='store_true', default=False, help='scan the binary once and drop into an interactive prompt')
+        self.argparser.add_argument('--jobs', type=int, metavar='<n>', default=1, help='number of worker processes for the gadget scan (default: 1)')
+        self.argparser.add_argument('--cache', action='store_true', default=False, help='cache discovered gadgets on disk and reuse them on repeated runs over the same file and options')
+        self.argparser.add_argument('--cache-dir', type=str, metavar='<dir>', default=None, help='directory for the gadget cache (default: $XDG_CACHE_HOME/rop3)')
 
     def parse_args(self, arguments):
         args = self.argparser.parse_args(arguments)
@@ -75,6 +84,8 @@ class ArgumentParser:
             flags |= gadfinder.ALLOW_UNDETERMINISTIC
         if args.allow_complex_memory_ops:
             flags |= gadfinder.ALLOW_COMPLEX_MEM
+        if not args.keep_canary_address:
+            flags |= gadfinder.AVOID_CANARY
 
         namespace['flags'] = flags
 
@@ -105,11 +116,16 @@ class ArgumentParser:
             for baddr in args.base:
                 self._check_int_value(baddr)
 
-        if args.badchar:
-            for badchar in args.badchar:
+        for option in (args.badchar, args.badchar_bytes):
+            if not option:
+                continue
+            for badchar in option:
                 value = self._check_int_value(badchar)
                 if value < 0x00 or value > 0xff:
                     debug.error(f'{badchar}: bad char must be one byte (range 0x00-0xff)')
+
+        if args.jobs is not None and args.jobs < 1:
+            debug.error(f'--jobs must be >= 1 (got {args.jobs})')
 
         if args.ropchain:
             ropchain_filename = os.path.abspath(args.ropchain)

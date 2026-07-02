@@ -54,7 +54,7 @@ class YamlParser:
         return ret
 
     def _get_op_files(self):
-        return [filename for filename in glob.glob(os.path.join(self.folder, '*.yaml'), recursive=True) if os.path.isfile(filename)]
+        return [filename for filename in glob.glob(os.path.join(self.folder, '**', '*.yaml'), recursive=True) if os.path.isfile(filename)]
 
     def _read_yaml(self, filename):
         with open(filename, 'r') as f:
@@ -100,7 +100,7 @@ class YamlParser:
                     for operand in ('op1', 'op2'):
                         if operand in item:
                             current_op = item[operand]
-                            if type(current_op) == dict:
+                            if isinstance(current_op, dict):
                                 raise NotImplementedError
                             else:
                                 # Resolve aliases if necessary

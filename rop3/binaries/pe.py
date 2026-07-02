@@ -33,7 +33,6 @@ class PE:
         try:
             self._pe = pefile.PE(data=data, fast_load=True)
             self._arch = self._parse_arch()
-            base = base[0] if isinstance(base, list) else base
             if base:
                 base = int(base, 0)
                 self._pe.relocate_image(base)
@@ -58,6 +57,22 @@ class PE:
                     'vaddr': self._pe.OPTIONAL_HEADER.ImageBase + sec.VirtualAddress,
                     'opcodes': sec.get_data()
                 })
+        return ret
+
+    def get_symbols(self):
+        ''' Best-effort symbols from the export table (names + ordinals),
+            relative to the (possibly relocated) image base. '''
+        ret = []
+        self._pe.parse_data_directories()
+        export_dir = getattr(self._pe, 'DIRECTORY_ENTRY_EXPORT', None)
+        if export_dir is None:
+            return ret
+        image_base = self._pe.OPTIONAL_HEADER.ImageBase
+        for exp in export_dir.symbols:
+            if exp.address:
+                name = exp.name.decode('utf-8', 'replace') if exp.name \
+                    else f'ordinal_{exp.ordinal}'
+                ret.append((image_base + exp.address, name))
         return ret
 
     def get_arch(self):
