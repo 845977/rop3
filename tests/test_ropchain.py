@@ -94,3 +94,29 @@ def test_explicit_dst_clears_clobbered_register(x64):
         'pop rbx ; ret',
         'mov rdx, rbx ; ret',
     ]
+
+
+def test_store_dst_does_not_clear_clobbered_address_register(x64):
+    '''
+    Regression (#36): a store `st(rbx, rax)` is `mov [rbx], rax`, where rbx is
+    the address base register (read, not written). It must NOT refresh rbx's
+    clobber state.
+
+    Step 1 `lc(rcx)` uses `pop rcx ; pop rbx ; ret`, which clobbers rbx.
+    Step 2 `st(rbx, rax)` reads rbx as an address; before the fix it wrongly
+    cleared rbx's clobber, so step 3 `mov(rdx, rbx)` (which reads rbx) was
+    allowed and an invalid chain was produced. After the fix rbx stays
+    clobbered and no chain is found.
+    '''
+    gadgets = [
+        make_gadget(b'\x59\x5b\xc3', 0x1000),       # pop rcx ; pop rbx ; ret
+        make_gadget(b'\x48\x89\x03\xc3', 0x1010),   # mov [rbx], rax ; ret
+        make_gadget(b'\x48\x89\xda\xc3', 0x1020),   # mov rdx, rbx ; ret
+    ]
+    chain = [
+        _op('lc', dst='rcx'),
+        _op('st', dst='rbx', src='rax'),
+        _op('mov', dst='rdx', src='rbx'),
+    ]
+    with pytest.raises(ropchain_mod.RopChainNotFound):
+        list(RopChain(None).search(gadgets, chain))

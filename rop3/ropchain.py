@@ -235,8 +235,14 @@ class RopChain:
                     for side_reg in gad.side_regs:
                         side_effected[side_reg] += 1
 
+                    # A gadget that explicitly writes its dst produces a fresh
+                    # value there, so clear any earlier clobber on it. Skip this
+                    # for store operations (mov [dst], src): there dst is the
+                    # address base register, which is read (not written), so its
+                    # clobber state must be preserved (issue #36).
                     norm_dst = arch.normalize_reg(gad.dst) if gad.dst else None
-                    saved_dst = side_effected[norm_dst] if norm_dst else 0
+                    refresh_dst = bool(norm_dst) and gad.writes_reg(norm_dst)
+                    saved_dst = side_effected[norm_dst] if refresh_dst else 0
                     if saved_dst:
                         side_effected[norm_dst] = 0
 

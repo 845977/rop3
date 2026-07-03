@@ -72,6 +72,18 @@ class Gadget:
                 if normalized not in excluded:
                     self.side_regs.add(normalized)
 
+    def writes_reg(self, normalized_reg: str) -> bool:
+        ''' Whether the gadget explicitly or implicitly writes normalized_reg. '''
+        arch = arch_singleton.arch
+        for decode in self.decodes:
+            explicit = {decode.reg_name(r) for r in decode.regs_write}
+            _, implicit_ids = decode.regs_access()
+            implicit = {decode.reg_name(r) for r in implicit_ids}
+            for reg in explicit | implicit:
+                if arch.normalize_reg(reg) == normalized_reg:
+                    return True
+        return False
+
     def subsumes(self, rhs) -> bool:
         if str(self.dst) != str(rhs.dst):
             return False
