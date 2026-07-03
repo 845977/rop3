@@ -249,9 +249,16 @@ class Operand:
 
     def set_dst(self, dst):
         if self.is_dst():
-            self.reg = dst
             self.generic = False
-            self.type = arch_singleton.arch.op_reg
+            if self.is_mem():
+                self.reg = dst
+            else:
+                try:
+                    self.imm = self._parse_imm(dst)
+                    self.type = arch_singleton.arch.op_imm
+                except (ValueError, TypeError):
+                    self.reg = dst
+                    self.type = arch_singleton.arch.op_reg
 
     def is_src(self):
         if self.reg is not None:
@@ -261,17 +268,21 @@ class Operand:
     def set_src(self, src):
         if self.is_src():
             self.generic = False
-            try:
-                self.imm = self._parse_imm(src)
-                self.type = arch_singleton.arch.op_imm
-            except (ValueError, TypeError):
+            if self.is_mem():
                 self.reg = src
-                self.type = arch_singleton.arch.op_reg
+            else:
+                try:
+                    self.imm = self._parse_imm(src)
+                    self.type = arch_singleton.arch.op_imm
+                except (ValueError, TypeError):
+                    self.reg = src
+                    self.type = arch_singleton.arch.op_reg
 
     def is_equal(self, decode, operand):
         operand_reg = None
 
-        if self.generic and self.is_src() and operand.type == arch_singleton.arch.op_imm:
+        # Allows generic reg -> imm substitution (not for mem)
+        if self.generic and self.is_src() and self.is_reg() and operand.type == arch_singleton.arch.op_imm:
             return (True, operand.value.imm)
 
         if self.type != operand.type:

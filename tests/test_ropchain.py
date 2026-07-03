@@ -65,3 +65,32 @@ def test_search_generic_registers(x64):
     results = list(RopChain(None).search(gadgets, chain))
     assert results
     assert all(len(r) == 1 for r in results)
+
+
+def test_explicit_dst_clears_clobbered_register(x64):
+    '''
+    Regression (#34): a register written by a later step must no longer be
+    considered clobbered by an earlier step.
+
+    Step 1 `lc(rax)` uses `pop rax ; pop rbx ; ret`, which clobbers rbx.
+    Step 2 `lc(rbx)` rewrites rbx, so it must be clean again for step 3
+    `mov(rdx, rbx)`, which reads rbx. Before the fix the stale clobber on rbx
+    blocked step 3 and no chain was found.
+    '''
+    gadgets = [
+        make_gadget(b'\x58\x5b\xc3', 0x1000),       # pop rax ; pop rbx ; ret
+        make_gadget(b'\x5b\xc3', 0x1010),           # pop rbx ; ret
+        make_gadget(b'\x48\x89\xda\xc3', 0x1020),   # mov rdx, rbx ; ret
+    ]
+    chain = [
+        _op('lc', dst='rax'),
+        _op('lc', dst='rbx'),
+        _op('mov', dst='rdx', src='rbx'),
+    ]
+    results = list(RopChain(None).search(gadgets, chain))
+    assert results
+    assert [g.text_repr for g in results[0]] == [
+        'pop rax ; pop rbx ; ret',
+        'pop rbx ; ret',
+        'mov rdx, rbx ; ret',
+    ]
