@@ -96,6 +96,35 @@ def test_explicit_dst_clears_clobbered_register(x64):
     ]
 
 
+def test_parse_negative_constant_source(x64, tmp_path):
+    '''
+    Regression (#38): a minus sign before a constant (e.g. -1) must be parsed
+    as the source operand. Before the fix REGEX_OP did not allow '-' in an
+    operand and the line failed with "Unable to parse operation".
+    '''
+    ropfile = tmp_path / 'chain.txt'
+    ropfile.write_text('sub(rax, -1)\n')
+    parsed = RopChain(None)._parse_ropfile(str(ropfile))
+    assert len(parsed) == 1
+    assert parsed[0]['op'] == 'sub'
+    assert parsed[0]['dst'] == 'rax'
+    assert parsed[0]['src'] == '-1'
+
+
+def test_parse_hyphenated_operation_name(x64, tmp_path):
+    '''
+    Regression (#38): an operation whose name contains a hyphen (e.g. jmp-rel)
+    must be parsed. Before the fix REGEX_OP did not allow '-' in the operation
+    name and the line failed with "Unable to parse operation". jmp-rel is a
+    composite operation, so it expands into its concrete steps.
+    '''
+    ropfile = tmp_path / 'chain.txt'
+    ropfile.write_text('jmp-rel(rax)\n')
+    parsed = RopChain(None)._parse_ropfile(str(ropfile))
+    assert parsed
+    assert all(op['op'] != 'jmp-rel' for op in parsed)
+
+
 def test_store_dst_does_not_clear_clobbered_address_register(x64):
     '''
     Regression (#36): a store `st(rbx, rax)` is `mov [rbx], rax`, where rbx is
