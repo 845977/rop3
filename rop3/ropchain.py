@@ -39,8 +39,8 @@ mov(reg3,reg2)  -> OP: mov, DST: reg3, SRC: reg2
 mov(reg3, reg2) -> OP: mov, DST: reg3, SRC: reg2
 '''
 REGEX_OP = re.compile(
-    r'^(?P<OP>[a-zA-Z]+)' + \
-    r'\((?P<DST>[a-zA-Z0-9]+)?(, ?(?P<SRC>[a-zA-Z0-9]+))?\)' + \
+    r'^(?P<OP>[a-zA-Z0-9-]+)' + \
+    r'\((?P<DST>[a-zA-Z0-9-]+)?(, ?(?P<SRC>[a-zA-Z0-9-]+))?\)' + \
     r'(?:\s*;.*)?$'
 )
 COMMENT = re.compile(r'^(?:\s*;.*)?$')
