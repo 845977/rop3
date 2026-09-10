@@ -15,6 +15,7 @@ You should have received a copy of the GNU General Public License
 along with rop3. If not, see <https://www.gnu.org/licenses/>.
 '''
 
+import os
 import sys
 
 import rop3.args
@@ -28,6 +29,16 @@ from rop3.api import Rop3
 
 def main():
     args = rop3.args.ArgumentParser().parse_args(sys.argv[1:])
+
+    # Emit results as they stream out of the search iterators. When stdout is a
+    # pipe or file it is block-buffered by default, so nothing would appear
+    # until the buffer fills or the whole scan ends -- hiding the streaming and
+    # losing every gadget already found if the run is interrupted. Line
+    # buffering flushes each gadget/chain as the iterator produces it.
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except (AttributeError, ValueError):
+        pass
 
     if args.verbose:
         debug.set_verbose()
@@ -61,14 +72,28 @@ def main():
                     result = rop.ropchain(args.ropchain)
                     utils.output_ropchains(result, out_fmt, exhaustive=args.exhaustive)
                 elif args.op:
-                    result = rop.find_op(args.op, operands=args.operands)
-                    if result and isinstance(result[0], list):
-                        ''' Composite operation: a list of chains '''
-                        utils.output_ropchains(result, out_fmt, exhaustive=True)
+                    # Stream matches so dumping an operation over a large binary
+                    # never materializes the whole gadget set or match list.
+                    # Compound-ness is decided up front (from the resolved
+                    # realizations) so the right renderer is chosen without
+                    # consuming the iterator.
+                    stream = rop.iter_op(args.op, operands=args.operands)
+                    if rop.op_is_compound(args.op):
+                        ''' Composite operation: a stream of chains '''
+                        utils.output_ropchains(stream, out_fmt, exhaustive=True)
                     else:
-                        utils.output_gadgets(result, out_fmt)
+                        utils.output_gadgets(stream, out_fmt)
                 else:
                     utils.output_gadgets(rop.gadgets(), out_fmt)
+        except BrokenPipeError:
+            # A downstream consumer closed the pipe early (e.g. `| head`,
+            # quitting `| less`). That is normal for a streamed dump, not an
+            # error -- swallow it. Python flushes stdout again at interpreter
+            # exit, which would raise a second BrokenPipeError and print a
+            # traceback, so redirect the fd to devnull before returning.
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            sys.exit(0)
         except parser.ParserException as exc:
             debug.error(str(exc))
         except rop3.ropchain.RopChainNotFound as exc:

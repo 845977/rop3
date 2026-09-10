@@ -27,7 +27,7 @@ import rop3.utils as utils
 import rop3.debug as debug
 import rop3.binary
 import rop3.search as search
-from rop3.operation import OperationDef, match_gadgets, realize
+from rop3.operation import OperationDef, match_gadgets, iter_match_gadgets, realize
 from rop3.arch import arch_singleton, DEFAULT_DEPTH
 from rop3.archs.x86_arch import X86_Architecture, X64_Architecture
 from rop3.archs.riscv_arch import RISCV_Architecture
@@ -186,6 +186,133 @@ class GadFinder:
         # Operands are positional: op1, op2, op3, ...
         return self.match_operation(gadgets, resolved, operands,
                                     reject_clobbered=not self._keep_contradictory())
+
+    # --- streaming (memory-frugal) operation matching ---------------------
+
+    def _ensure_arch(self, filenames, base=None, arch=None):
+        ''' Initialize the process-global architecture from the first binary.
+            Operation resolution (arch-specific realizations and REG_SP/REG_BP
+            aliases, per-arch availability) needs the architecture live, so the
+            streaming entry points below call this before resolving any op --
+            the list-based `find_op` gets it for free because `find` runs first.
+            Opening a binary only parses its header/sections; it does not scan. '''
+        bases = base if isinstance(base, list) else [base] * len(filenames)
+        self._open_binary(filenames[0], bases[0], arch)
+
+    def _iter_unique_gadgets(self, filenames, base=None, badchars=None,
+                             badchar_bytes=None, arch=None, symbols=False):
+        ''' Stream the gadgets of every binary one at a time, deduplicating by
+            instruction text (unless KEEP_DUPLICATES) while holding only a
+            lightweight set of seen `text_repr`s -- never the full Gadget set.
+
+            This is the memory-frugal counterpart to `find`: it does not retain
+            (or canary-rank) every unique gadget, so the heavy capstone
+            disassembly of the gadgets a caller discards is freed as the scan
+            advances. It therefore yields the *first* address seen for each
+            distinct gadget rather than `find`'s canary-best representative,
+            which is immaterial to operation matching (matching reads only the
+            decoded instructions and frame). Callers that need the ranked,
+            fully-materialized list still use `find`. '''
+        bases = base if isinstance(base, list) else [base] * len(filenames)
+        dedup = not self._keep_duplicates()
+        seen: set = set()
+        for filename, file_base in zip(filenames, bases):
+            binary = self._open_binary(filename, file_base, arch)
+            symtab = self._symbol_table(binary) if symbols else None
+            for gadget in self._search_gadgets(binary, badchars, badchar_bytes, symtab):
+                if dedup:
+                    if gadget.text_repr in seen:
+                        continue
+                    seen.add(gadget.text_repr)
+                yield gadget
+
+    def iter_op(self, filenames, op, operands=None, *, base=None, badchars=None,
+                badchar_bytes=None, arch=None, symbols=False):
+        ''' Iterator form of `find_op`: yield the gadgets (or, for a compound
+            op, the ROP chains) realizing `op`, streaming the scan so neither
+            the full gadget set nor the full result list is ever materialized.
+
+            A single-gadget operation matches each scanned gadget as it arrives
+            and yields its matches immediately. A compound operation still needs
+            random access to every gadget (the chain assembler sorts, products
+            and prunes them), so those are streamed into a one-shot list and the
+            lazily-yielded chain search runs over it -- the chains themselves are
+            still produced one at a time. '''
+        from rop3.ropchain import RopChain, RopChainNotFound
+
+        self._ensure_arch(filenames, base, arch)
+        resolved = parser.Parser().get_op(op)
+        operands = list(operands) if operands else []
+
+        if any(not real.is_single_gadget for real in resolved.realizations):
+            step = {'op': op, 'operands': operands,
+                    'data': f'{op}({", ".join(operands)})'}
+            gadgets = list(self._iter_unique_gadgets(
+                filenames, base, badchars, badchar_bytes, arch, symbols))
+            try:
+                yield from RopChain(self).search(gadgets, [step],
+                                                 prune_equivalent=False)
+            except RopChainNotFound:
+                return
+            return
+
+        reject = not self._keep_contradictory()
+        # Feed the gadget stream straight into the iterator matcher: it consumes
+        # the source lazily and yields each match as it is found, so a huge match
+        # set is never materialized here.
+        yield from iter_match_gadgets(
+            resolved, operands,
+            self._iter_unique_gadgets(filenames, base, badchars,
+                                      badchar_bytes, arch, symbols),
+            reject_clobbered=reject)
+
+    def count_ops(self, filenames, ops, *, base=None, badchars=None,
+                  badchar_bytes=None, arch=None, symbols=False) -> dict:
+        ''' Number of gadgets (or chains, for compound ops) realizing each op in
+            `ops`, computed with a bounded memory footprint. Every single-gadget
+            op is tallied together in one streaming pass over the deduplicated
+            gadget set, so the set is scanned once and never retained; compound
+            (chain) ops, which need random access to all gadgets, are counted
+            afterwards via `iter_op` (one extra streamed scan each).
+
+            Returns {op: count}, with an op that is unavailable for the target
+            architecture mapped to None (distinct from 0 matches). Operands are
+            left unconstrained -- this is the presence probe run-experiments
+            needs, not a bound query. '''
+        self._ensure_arch(filenames, base, arch)
+
+        counts: dict = {}
+        singles: dict = {}          # op -> OperationDef (single-gadget only)
+        compound: list = []
+        for op in ops:
+            try:
+                defn = parser.Parser().get_op(op)
+            except parser.OperationNotAvailable:
+                counts[op] = None
+                continue
+            if not defn.available:
+                counts[op] = None
+            elif any(not real.is_single_gadget for real in defn.realizations):
+                compound.append(op)
+            else:
+                singles[op] = defn
+                counts[op] = 0
+
+        if singles:
+            reject = not self._keep_contradictory()
+            for gadget in self._iter_unique_gadgets(
+                    filenames, base, badchars, badchar_bytes, arch, symbols):
+                batch = [gadget]
+                for op, defn in singles.items():
+                    counts[op] += sum(1 for _ in iter_match_gadgets(
+                        defn, [], batch, reject_clobbered=reject))
+
+        for op in compound:
+            counts[op] = sum(1 for _ in self.iter_op(
+                filenames, op, base=base, badchars=badchars,
+                badchar_bytes=badchar_bytes, arch=arch, symbols=symbols))
+
+        return counts
 
     # --- ROP-chain classification -----------------------------------------
 

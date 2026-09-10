@@ -124,6 +124,28 @@ class Rop3:
             `operands` are positional: op1, op2, op3, ... '''
         return self._finder.find_op_from_gadgets(self.gadgets(), op, operands)
 
+    def iter_op(self, op, operands=None):
+        ''' Streaming form of `find_op`: yield the gadgets (or, for a compound
+            op, the ROP chains) implementing `op`, scanning the binaries lazily
+            so neither the full gadget set nor the full match list is ever held
+            in memory. This is the crash-safe path for dumping an operation over
+            a large binary; `find_op` (which caches all gadgets) is for repeated
+            queries on the same instance. '''
+        return self._finder.iter_op(
+            self.binaries, op, operands, base=self.base, badchars=self.badchars,
+            badchar_bytes=self.badchar_bytes, arch=self.arch, symbols=self.symbols)
+
+    def op_is_compound(self, op):
+        ''' Whether `op` realizes as multi-gadget ROP chains (each yielded as a
+            list of gadgets) rather than single gadgets, so a caller can pick a
+            chain vs gadget renderer without consuming the `iter_op` stream.
+            Initializes the process-global architecture (needed to resolve
+            arch-specific realizations) but does not scan for gadgets. '''
+        import rop3.parser as parser
+        self._finder._ensure_arch(self.binaries, self.base, self.arch)
+        resolved = parser.Parser().get_op(op)
+        return any(not real.is_single_gadget for real in resolved.realizations)
+
     def ropchain(self, ropfile):
         ''' Iterator over ROP chains satisfying the operations in `ropfile`. '''
         return RopChain(self._finder).search_from_gadgets(self.gadgets(), ropfile)

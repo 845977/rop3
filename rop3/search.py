@@ -84,28 +84,66 @@ def galileo_scan(opcodes, base_vaddr, terminations, depth, alignment, disasm,
                     yield vaddr, raw, decodes
 
 
-def _linear_disasm(opcodes, base_vaddr, alignment, disasm):
+# Bytes handed to capstone per disassembly call. `Cs.disasm` is *eager* -- it
+# decodes its whole input buffer into one detail-carrying C array before the
+# first instruction is yielded -- so disassembling a large section in a single
+# call allocates the entire section at once (gigabytes on a big binary; the
+# OOM that killed such scans). Feeding it a bounded chunk at a time caps that
+# allocation; the chunk must exceed the longest instruction (<16 B) so at least
+# one instruction always fits.
+_DISASM_CHUNK_BYTES = 32 * 1024
+
+
+def _iter_linear_disasm(opcodes, base_vaddr, alignment, disasm):
     '''
-    Linear sweep: disassemble `opcodes` as the intended instruction stream, in
-    program order. Capstone stops at the first byte it cannot decode; when that
-    happens the sweep resynchronizes by skipping one aligned unit past the
-    offending byte and resumes. Returns the list of decoded instructions.
+    Linear sweep, streamed: yield the decoded instructions of `opcodes` in
+    program order, one at a time, disassembling in bounded byte-chunks so
+    capstone never materializes the whole section at once (see
+    `_DISASM_CHUNK_BYTES`). Capstone stops at the first byte it cannot decode;
+    when that happens the sweep resynchronizes by skipping one aligned unit past
+    the offending byte and resumes. An instruction straddling a chunk boundary
+    is simply re-decoded from the next chunk (capstone stops at the last
+    complete instruction, and the sweep advances only by the bytes consumed).
+
+    This is a generator so the aligned scans never hold a whole section's worth
+    of (detail-carrying) capstone instructions at once. They keep only a bounded
+    backward window (see `aligned_scan`).
     '''
-    insns = []
     n = len(opcodes)
     step = max(1, alignment)
     off = 0
     while off < n:
         produced = 0
-        for insn in disasm(opcodes[off:], base_vaddr + off):
-            insns.append(insn)
+        for insn in disasm(opcodes[off:off + _DISASM_CHUNK_BYTES], base_vaddr + off):
+            yield insn
             produced += insn.size
         # Resume right after the decoded run; if nothing decoded (bad byte at
-        # `off`), skip one aligned unit to move past it.
+        # `off`, or -- impossible for a chunk this size -- an over-long insn),
+        # skip one aligned unit to move past it.
         off += produced if produced else step
         if alignment > 1 and off % alignment:
             off += alignment - (off % alignment)
-    return insns
+
+
+def _linear_disasm(opcodes, base_vaddr, alignment, disasm):
+    ''' Program-order list of the section's decoded instructions. The
+        materialized convenience over `_iter_linear_disasm`; the scans stream
+        the generator instead so they never hold the whole section at once. '''
+    return list(_iter_linear_disasm(opcodes, base_vaddr, alignment, disasm))
+
+
+def _prune_window(window, cur_end, depth):
+    ''' Drop instructions off the front of the backward `window` that can no
+        longer belong to any gadget ending at the current position or later: a
+        gadget spans at most `depth` bytes, and later terminators only end
+        further right, so any instruction more than `depth` bytes before
+        `cur_end` is dead for every remaining terminator. Keeps the window
+        bounded to ~depth bytes regardless of section size. '''
+    drop = 0
+    while drop < len(window) and cur_end - window[drop].address > depth:
+        drop += 1
+    if drop:
+        del window[:drop]
 
 
 def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
@@ -132,28 +170,34 @@ def aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
     ------
     (vaddr, raw, decodes)
     '''
-    insns = _linear_disasm(opcodes, base_vaddr, alignment, disasm)
+    # A bounded backward window of recent instructions replaces a full-section
+    # instruction list: the walk never looks back more than `depth` bytes, so
+    # everything older is pruned as the sweep advances (see `_prune_window`).
+    window: list = []
+    for cur in _iter_linear_disasm(opcodes, base_vaddr, alignment, disasm):
+        term_end = cur.address + cur.size
+        _prune_window(window, term_end, depth)
+        window.append(cur)
 
-    for i, terminator in enumerate(insns):
         # A termination is any instruction that is a valid gadget on its own.
-        if not is_valid_gadget([terminator]):
+        if not is_valid_gadget([cur]):
             continue
-        term_end = terminator.address + terminator.size
 
         # Walk backward over the contiguous run of intended instructions.
+        i = len(window) - 1
         j = i
         while j >= 0:
             # Stop at a discontinuity (a resync gap): a gadget's bytes must be
             # a single contiguous run.
-            if j < i and insns[j].address + insns[j].size != insns[j + 1].address:
+            if j < i and window[j].address + window[j].size != window[j + 1].address:
                 break
-            if term_end - insns[j].address > depth:
+            if term_end - window[j].address > depth:
                 break
 
-            vaddr = insns[j].address
+            vaddr = window[j].address
             raw = opcodes[vaddr - base_vaddr:term_end - base_vaddr]
             if accept_candidate is None or accept_candidate(vaddr, raw):
-                candidate = insns[j:i + 1]
+                candidate = window[j:i + 1]
                 if is_valid_gadget(candidate):
                     yield vaddr, raw, candidate
             j -= 1
@@ -193,32 +237,37 @@ def framed_aligned_scan(opcodes, base_vaddr, depth, alignment, disasm,
     ------
     (vaddr, raw, decodes)
     '''
-    insns = _linear_disasm(opcodes, base_vaddr, alignment, disasm)
+    # Bounded backward window, as in `aligned_scan`: the frame walk looks back
+    # at most `depth` bytes, so the section is never held whole in memory.
+    window: list = []
+    for cur in _iter_linear_disasm(opcodes, base_vaddr, alignment, disasm):
+        term_end = cur.address + cur.size
+        _prune_window(window, term_end, depth)
+        window.append(cur)
 
-    for i, terminator in enumerate(insns):
-        if not is_valid_gadget([terminator]):
+        if not is_valid_gadget([cur]):
             continue
-        requires_frame = is_return(terminator)
-        term_end = terminator.address + terminator.size
+        requires_frame = is_return(cur)
 
         frame_loaded = False
+        i = len(window) - 1
         j = i
         while j >= 0:
-            if j < i and insns[j].address + insns[j].size != insns[j + 1].address:
+            if j < i and window[j].address + window[j].size != window[j + 1].address:
                 break
-            if term_end - insns[j].address > depth:
+            if term_end - window[j].address > depth:
                 break
 
-            # Prepending insns[j]; once we cover the frame load the whole
+            # Prepending window[j]; once we cover the frame load the whole
             # (and every longer) run establishes its return frame.
-            if is_frame_load(insns[j]):
+            if is_frame_load(window[j]):
                 frame_loaded = True
 
             if frame_loaded or not requires_frame:
-                vaddr = insns[j].address
+                vaddr = window[j].address
                 raw = opcodes[vaddr - base_vaddr:term_end - base_vaddr]
                 if accept_candidate is None or accept_candidate(vaddr, raw):
-                    candidate = insns[j:i + 1]
+                    candidate = window[j:i + 1]
                     if is_valid_gadget(candidate):
                         yield vaddr, raw, candidate
             j -= 1

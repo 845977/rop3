@@ -59,39 +59,54 @@ def is_immediate(value) -> bool:
 # OperationDef (via the parser) before calling, so this module never does name
 # lookups for matching.
 
-def match_gadgets(defn: OperationDef, operands: list | None,
-                  gadgets: list[Gadget], reject_clobbered: bool = True) -> list[Gadget]:
-    ''' Gadgets whose instructions realize `defn` with the given positional
-        operands. The operation's instructions must be a consecutive run, the
-        first sitting right after the architecture's frame prologue
-        (Set.is_equal).
+def iter_match_gadgets(defn: OperationDef, operands: list | None,
+                       gadgets, reject_clobbered: bool = True):
+    ''' Iterator form of `match_gadgets`: yield each realizing gadget as it is
+        found, consuming `gadgets` lazily. Operation search over a whole binary
+        can produce a very large number of matches; yielding them one at a time
+        (rather than accumulating the full list here) lets a streaming caller
+        emit results without ever holding them all in memory -- the memory blow
+        up that crashed large scans. `gadgets` may itself be an iterator.
 
-        With `reject_clobbered` (the default), a gadget is discarded when its
+        Matching semantics are identical to `match_gadgets`: the operation's
+        instructions must be a consecutive run, the first sitting right after
+        the architecture's frame prologue (Set.is_equal), and with
+        `reject_clobbered` (the default) a gadget is discarded when its
         destination register is overwritten before the terminator (a
-        "contradictory" gadget that does not actually realize the operation),
-        via Gadget.result_clobbered -- before the (more expensive) annotation. '''
+        "contradictory" gadget), via Gadget.result_clobbered -- before the
+        (more expensive) annotation. '''
     if not defn.available:
         reason = defn.unavailable_reason or 'not available for this architecture'
         raise parser.OperationNotAvailable(f'{defn.name}: {reason}')
 
     bindings = _operand_bindings(operands)
-    ret: list[Gadget] = []
-    if not gadgets:
-        return ret
 
-    for real in defn.realizations:
-        # Realizations must be single gadgets (no references)
-        if not real.is_single_gadget:
-            continue
-        set_ = real.links[0].bound(bindings)
-        for gadget in gadgets:
-            for binds, indices in set_.all_matches(gadget.decodes, gadget.frame):
+    # Realizations must be single gadgets (no references). Bind each once, then
+    # walk the gadget stream; iterating gadgets in the inner loop keeps the
+    # search single-pass so an iterator source is consumed exactly once.
+    sets = [real.links[0].bound(bindings)
+            for real in defn.realizations if real.is_single_gadget]
+    if not sets:
+        return
+
+    for gadget in gadgets:
+        for set_ in sets:
+            for binds, indices in set_.iter_matches(gadget.decodes, gadget.frame):
                 if reject_clobbered and gadget.result_clobbered(
                         indices, _destination_registers(defn, bindings, binds)):
                     continue
-                ret.append(_annotate(defn, bindings, gadget, binds))
+                yield _annotate(defn, bindings, gadget, binds)
 
-    return ret
+
+def match_gadgets(defn: OperationDef, operands: list | None,
+                  gadgets: list[Gadget], reject_clobbered: bool = True) -> list[Gadget]:
+    ''' Gadgets whose instructions realize `defn` with the given positional
+        operands, materialized into a list. This is the list-returning
+        convenience over `iter_match_gadgets`; streaming callers (the
+        memory-frugal `GadFinder.iter_op`/`count_ops`) use the iterator directly
+        so a full-binary match set is never held in memory at once. '''
+    return list(iter_match_gadgets(defn, operands, gadgets,
+                                   reject_clobbered=reject_clobbered))
 
 
 def _operand_bindings(operands: list | None) -> dict:
